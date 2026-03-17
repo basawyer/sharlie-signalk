@@ -1,8 +1,24 @@
 module.exports = function (app) {
   const plugin = {};
 
-  const POLL_MS = 250;
+  // Fixed poll interval for both bilge and fresh water logic
+  const POLL_MS = 1000;
   const STATE_FILE = 'sharlie-plugin-state.json';
+
+  // Hard-coded paths for bilge pump
+  const BILGE_STATE_PATH = 'electrical.bilgePump.state';
+  const BILGE_NOTIFICATION_PATH = 'notifications.electrical.bilgePump';
+
+  // Hard-coded paths for fresh water usage
+  const FRESH_WATER_STATE_PATH = 'electrical.freshWaterPump.state';
+  const FRESH_WATER_ALLTIME_SECONDS_PATH =
+    'tanks.freshWater.usage.allTime.seconds';
+  const FRESH_WATER_ALLTIME_OUNCES_PATH =
+    'tanks.freshWater.usage.allTime.ounces';
+  const FRESH_WATER_CURRENT_SECONDS_PATH =
+    'tanks.freshWater.usage.currentSeconds';
+  const FRESH_WATER_CURRENT_OUNCES_PATH =
+    'tanks.freshWater.usage.currentOunces';
 
   plugin.id = 'sharlie-plugin';
   plugin.name = 'Sharlie Plugin';
@@ -13,128 +29,78 @@ module.exports = function (app) {
   const path = require('path');
 
   let intervalHandle = null;
-  let lastStates = {};      
+  let lastStates = {};
   let state = {
-          freshWater: {
-            allTimeTotalOunces: 0,
-            allTimeTotalSeconds: 0
-          }
-        };
+    freshWater: {
+      allTimeTotalOunces: 0,
+      allTimeTotalSeconds: 0
+    }
+  };
+  // Current (non-persisted) fresh water usage
+  let currentFreshWater = {
+    currentOunces: 0,
+    currentSeconds: 0
+  };
   plugin.schema = {
     type: 'object',
+    title: 'Sharlie bilge and fresh water monitoring',
+    description:
+      'Monitors a bilge pump GPIO and a fresh water pump GPIO, publishing state and usage to Signal K.',
     properties: {
-      pollMs: {
-        type: 'number',
-        title: 'Poll interval (ms)',
-        default: 1000,
-        minimum: 200
+      enabled: {
+        type: 'boolean',
+        title: 'Enable Sharlie plugin',
+        description: 'Turn the Sharlie plugin on or off.',
+        default: true
       },
       gpiochip: {
         type: 'string',
-        title: 'GPIO chip',
+        title: 'GPIO chip device',
+        description:
+          'Linux gpiochip device name used for both bilge and fresh water pumps.',
         default: 'gpiochip0'
       },
-      useBiasPullUp: {
-        type: 'boolean',
-        title: 'Use --bias=pull-up with gpioget',
-        default: true
-      },
-      inputs: {
-        type: 'array',
-        title: 'Inputs',
-        items: {
-          type: 'object',
-          required: ['id', 'gpio', 'statePath'],
-          properties: {
-            id: {
-              type: 'string',
-              title: 'ID',
-              default: 'bilge1'
-            },
-            enabled: {
-              type: 'boolean',
-              title: 'Enabled',
-              default: true
-            },
-            label: {
-              type: 'string',
-              title: 'Label',
-              default: 'Bilge Pump'
-            },
-            gpio: {
-              type: 'number',
-              title: 'GPIO number',
-              default: 27
-            },
-            activeLow: {
-              type: 'boolean',
-              title: 'Active low (0 means ON)',
-              default: true
-            },
-            statePath: {
-              type: 'string',
-              title: 'Signal K state path',
-              default: 'electrical.bilgePump.state'
-            },
-            notificationPath: {
-              type: 'string',
-              title: 'Notification path',
-              default: 'notifications.electrical.bilgePump'
-            },
-            notifyOnState: {
-              type: 'boolean',
-              title: 'Raise notification while ON',
-              default: true
-            }
+      bilge: {
+        type: 'object',
+        title: 'Bilge pump',
+        description:
+          'Configuration for the bilge pump GPIO and its alarm notification.',
+        properties: {
+          gpio: {
+            type: 'number',
+            title: 'Bilge pump GPIO',
+            description:
+              'GPIO pin number connected to the bilge pump (active-low, 0 = ON).',
+            default: 27
           }
-        },
-        default: [
-          {
-            id: 'bilge',
-            enabled: true,
-            label: 'Bilge Pump',
-            gpio: 27,
-            activeLow: true,
-            statePath: 'electrical.bilgePump.state',
-            notificationPath: 'notifications.electrical.bilgePump',
-            notifyOnState: false
-          }
-        ]
+        }
       },
       freshWater: {
         type: 'object',
+        title: 'Fresh water pump',
+        description:
+          'Configuration for the fresh water pump and derived usage metrics.',
         properties: {
-          enabled: {
-            type: 'boolean',
-            default: true
-          },
-          label: {
-            type: 'string',
-            default: 'Fresh Water Pump'
-          },
           gpio: {
             type: 'number',
+            title: 'Fresh water pump GPIO',
+            description:
+              'GPIO pin number connected to the fresh water pump (active-low, 0 = ON).',
             default: 24
-          },
-          activeLow: {
-            type: 'boolean',
-            default: true
           },
           ouncesPerSecond: {
             type: 'number',
+            title: 'Flow rate (oz/s)',
+            description:
+              'Estimated fresh water flow rate in ounces per second while the pump is ON.',
             default: 0
           },
-          statePath: {
-            type: 'string',
-            default: 'electrical.freshWaterPump.state'
-          },
-          allTimeTotalOuncesPath: {
-            type: 'string',
-            default: 'tanks.freshWater.usage.allTimeOunces'
-          },
-          allTimeTotalSecondsPath: {
-            type: 'string',
-            default: 'tanks.freshWater.usage.allTimeSeconds'
+          resetCurrentUsage: {
+            type: 'boolean',
+            title: 'Reset current fresh water usage now',
+            description:
+              'When enabled and settings are saved, currentSeconds and currentOunces will be reset to 0 (non-persisted).',
+            default: false
           }
         }
       }
@@ -217,9 +183,8 @@ module.exports = function (app) {
     return new Promise((resolve, reject) => {
       const args = [];
 
-      if (options.useBiasPullUp) {
-        args.push('--bias=pull-up');
-      }
+      // Always use bias pull-up and active-low logic
+      args.push('--bias=pull-up');
 
       args.push(options.gpiochip, String(gpio));
 
@@ -241,35 +206,33 @@ module.exports = function (app) {
     });
   }
 
-  async function readInput(options, input) {
-    const rawHigh = await execGpioget(options, input.gpio);
-    return input.activeLow ? !rawHigh : rawHigh;
+  // All inputs (bilge and fresh water) are wired active-low (0 means ON)
+  async function readInput(options, gpio) {
+    const rawHigh = await execGpioget(options, gpio);
+    return !rawHigh;
   }
 
   function handleBilge(input, isOn) {
-    const prev = lastStates[input.id];
+    const key = 'bilge';
+    const prev = lastStates[key];
 
     if (prev === undefined || prev !== isOn) {
-      if (isOn && input.notifyOnState) {
-        setNotification(input.notificationPath, `${input.label} is ON`);
+      if (isOn) {
+        setNotification(BILGE_NOTIFICATION_PATH, 'Bilge Pump is ON');
       } else {
-        clearNotification(input.notificationPath);
+        clearNotification(BILGE_NOTIFICATION_PATH);
       }
     }
 
-    publishValue(input.statePath, isOn);
-    lastStates[input.id] = isOn;
+    publishValue(BILGE_STATE_PATH, isOn);
+    lastStates[key] = isOn;
   }
 
   function handleFreshWater(options, isOn) {
     const cfg = options.freshWater;
 
-    if (!cfg || !cfg.enabled) {
-      return;
-    }
-
     if (lastStates.freshWater !== isOn) {
-      publishValue(cfg.statePath, isOn);
+      publishValue(FRESH_WATER_STATE_PATH, isOn);
       lastStates.freshWater = isOn;
     }
 
@@ -279,14 +242,24 @@ module.exports = function (app) {
 
       state.freshWater.allTimeTotalSeconds += secondsIncrement;
       state.freshWater.allTimeTotalOunces += ouncesIncrement;
+      currentFreshWater.currentSeconds += secondsIncrement;
+      currentFreshWater.currentOunces += ouncesIncrement;
 
       publishValue(
-        cfg.allTimeTotalSecondsPath,
+        FRESH_WATER_ALLTIME_SECONDS_PATH,
         state.freshWater.allTimeTotalSeconds
       );
       publishValue(
-        cfg.allTimeTotalOuncesPath,
+        FRESH_WATER_ALLTIME_OUNCES_PATH,
         state.freshWater.allTimeTotalOunces
+      );
+      publishValue(
+        FRESH_WATER_CURRENT_SECONDS_PATH,
+        currentFreshWater.currentSeconds
+      );
+      publishValue(
+        FRESH_WATER_CURRENT_OUNCES_PATH,
+        currentFreshWater.currentOunces
       );
 
       saveState();
@@ -294,46 +267,66 @@ module.exports = function (app) {
   }
 
   async function pollOnce(options) {
-    for (const input of options.inputs || []) {
-      if (!input.enabled) {
-        continue;
-      }
-
+    // Bilge pump
+    if (options.bilge && options.bilge.gpio != null) {
       try {
-        const isOn = await readInput(options, input);
-        handleBilge(input, isOn);
+        const bilgeIsOn = await readInput(options, options.bilge.gpio);
+        handleBilge({ gpio: options.bilge.gpio }, bilgeIsOn);
       } catch (err) {
         app.error(err.message);
       }
     }
 
-    if (options.freshWater && options.freshWater.enabled) {
-      try {
-        const isOn = await readInput(options, {
-          gpio: options.freshWater.gpio,
-          activeLow: options.freshWater.activeLow
-        });
+    // Fresh water pump
+    const freshWaterCfg = options.freshWater;
+    if (!freshWaterCfg || freshWaterCfg.gpio == null) {
+      return;
+    }
 
-        handleFreshWater(options, isOn);
-      } catch (err) {
-        app.error(err.message);
-      }
+    try {
+      const freshWaterIsOn = await readInput(options, freshWaterCfg.gpio);
+      handleFreshWater(options, freshWaterIsOn);
+    } catch (err) {
+      app.error(err.message);
     }
   }
 
   plugin.start = function (options) {
     lastStates = {};
+    currentFreshWater = {
+      currentOunces: 0,
+      currentSeconds: 0
+    };
     loadState();
 
-    if (options.freshWater && options.freshWater.enabled) {
-      publishValue(options.freshWater.statePath, false);
+    if (!options || options.enabled === false) {
+      app.debug('Sharlie plugin disabled (enabled=false)');
+      return;
+    }
+
+    if (options.freshWater) {
+      // Optionally reset current usage when requested from settings
+      if (options.freshWater.resetCurrentUsage) {
+        currentFreshWater.currentOunces = 0;
+        currentFreshWater.currentSeconds = 0;
+      }
+
+      publishValue(FRESH_WATER_STATE_PATH, false);
       publishValue(
-        options.freshWater.allTimeTotalSecondsPath,
+        FRESH_WATER_ALLTIME_SECONDS_PATH,
         state.freshWater.allTimeTotalSeconds
       );
       publishValue(
-        options.freshWater.allTimeTotalOuncesPath,
+        FRESH_WATER_ALLTIME_OUNCES_PATH,
         state.freshWater.allTimeTotalOunces
+      );
+      publishValue(
+        FRESH_WATER_CURRENT_SECONDS_PATH,
+        currentFreshWater.currentSeconds
+      );
+      publishValue(
+        FRESH_WATER_CURRENT_OUNCES_PATH,
+        currentFreshWater.currentOunces
       );
     }
 
