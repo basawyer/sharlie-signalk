@@ -1,0 +1,9 @@
+{
+  "name": "sharlie-plugin",
+  "version": "0.1.0",
+  "description": "Sharlie on signal-k",
+  "main": "index.js",
+  "keywords": ["signalk-node-server-plugin", "signalk-category-hardware"],
+  "author": "Blake Sawyer",
+  "license": "MIT"
+}
