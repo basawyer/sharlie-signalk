@@ -1,14 +1,25 @@
 module.exports = function (app) {
   const plugin = {};
 
+  const POLL_MS = 250;
+  const STATE_FILE = 'sharlie-plugin-state.json';
+
   plugin.id = 'sharlie-plugin';
   plugin.name = 'Sharlie Plugin';
   plugin.description = 'Sharlie on signal-k';
 
   const { execFile } = require('child_process');
+  const fs = require('fs');
+  const path = require('path');
 
   let intervalHandle = null;
   let lastStates = {};      
+  let state = {
+          freshWater: {
+            allTimeTotalOunces: 0,
+            allTimeTotalSeconds: 0
+          }
+        };
   plugin.schema = {
     type: 'object',
     properties: {
