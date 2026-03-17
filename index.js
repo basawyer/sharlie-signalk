@@ -13,12 +13,12 @@ module.exports = function (app) {
   const FRESH_WATER_STATE_PATH = 'electrical.freshWaterPump.state';
   const FRESH_WATER_ALLTIME_SECONDS_PATH =
     'tanks.freshWater.usage.allTime.seconds';
-  const FRESH_WATER_ALLTIME_OUNCES_PATH =
-    'tanks.freshWater.usage.allTime.ounces';
+  const FRESH_WATER_ALLTIME_GALLONS_PATH =
+    'tanks.freshWater.usage.allTime.gallons';
   const FRESH_WATER_CURRENT_SECONDS_PATH =
     'tanks.freshWater.usage.currentSeconds';
-  const FRESH_WATER_CURRENT_OUNCES_PATH =
-    'tanks.freshWater.usage.currentOunces';
+  const FRESH_WATER_CURRENT_GALLONS_PATH =
+    'tanks.freshWater.usage.currentGallons';
 
   plugin.id = 'sharlie-plugin';
   plugin.name = 'Sharlie Plugin';
@@ -32,13 +32,15 @@ module.exports = function (app) {
   let lastStates = {};
   let state = {
     freshWater: {
-      allTimeTotalOunces: 0,
+      // Stored in gallons
+      allTimeTotalGallons: 0,
       allTimeTotalSeconds: 0
     }
   };
   // Current (non-persisted) fresh water usage
   let currentFreshWater = {
-    currentOunces: 0,
+    // Stored in gallons
+    currentGallons: 0,
     currentSeconds: 0
   };
   plugin.schema = {
@@ -90,9 +92,9 @@ module.exports = function (app) {
           },
           ouncesPerSecond: {
             type: 'number',
-            title: 'Flow rate (oz/s)',
+            title: 'Flow rate (fl oz/s)',
             description:
-              'Estimated fresh water flow rate in ounces per second while the pump is ON.',
+              'Estimated fresh water flow rate in fluid ounces per second while the pump is ON. Stored usage is in gallons.',
             default: 0
           },
           resetCurrentUsage: {
@@ -111,17 +113,21 @@ module.exports = function (app) {
     try {
       if (fs.existsSync(STATE_FILE)) {
         const loaded = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+        const loadedFresh = loaded && loaded.freshWater ? loaded.freshWater : {};
+        // Backward compatible: accept historical ounces, convert to gallons.
+        const loadedOunces = Number(loadedFresh.allTimeTotalOunces || 0);
+        const loadedGallonsRaw =
+          loadedFresh.allTimeTotalGallons != null
+            ? Number(loadedFresh.allTimeTotalGallons)
+            : loadedOunces / 128;
+
         state = {
           freshWater: {
-            allTimeTotalOunces: Number(
-              loaded &&
-                loaded.freshWater &&
-                loaded.freshWater.allTimeTotalOunces || 0
-            ),
+            allTimeTotalGallons: isFinite(loadedGallonsRaw)
+              ? loadedGallonsRaw
+              : 0,
             allTimeTotalSeconds: Number(
-              loaded &&
-                loaded.freshWater &&
-                loaded.freshWater.allTimeTotalSeconds || 0
+              loadedFresh.allTimeTotalSeconds || 0
             )
           }
         };
@@ -238,28 +244,30 @@ module.exports = function (app) {
 
     if (isOn) {
       const secondsIncrement = POLL_MS / 1000;
-      const ouncesIncrement = Number(cfg.ouncesPerSecond || 0) * secondsIncrement;
+      const ouncesIncrement =
+        Number(cfg.ouncesPerSecond || 0) * secondsIncrement;
+      const gallonsIncrement = ouncesIncrement / 128;
 
       state.freshWater.allTimeTotalSeconds += secondsIncrement;
-      state.freshWater.allTimeTotalOunces += ouncesIncrement;
+      state.freshWater.allTimeTotalGallons += gallonsIncrement;
       currentFreshWater.currentSeconds += secondsIncrement;
-      currentFreshWater.currentOunces += ouncesIncrement;
+      currentFreshWater.currentGallons += gallonsIncrement;
 
       publishValue(
         FRESH_WATER_ALLTIME_SECONDS_PATH,
         state.freshWater.allTimeTotalSeconds
       );
       publishValue(
-        FRESH_WATER_ALLTIME_OUNCES_PATH,
-        state.freshWater.allTimeTotalOunces
+        FRESH_WATER_ALLTIME_GALLONS_PATH,
+        state.freshWater.allTimeTotalGallons
       );
       publishValue(
         FRESH_WATER_CURRENT_SECONDS_PATH,
         currentFreshWater.currentSeconds
       );
       publishValue(
-        FRESH_WATER_CURRENT_OUNCES_PATH,
-        currentFreshWater.currentOunces
+        FRESH_WATER_CURRENT_GALLONS_PATH,
+        currentFreshWater.currentGallons
       );
 
       saveState();
@@ -294,7 +302,7 @@ module.exports = function (app) {
   plugin.start = function (options) {
     lastStates = {};
     currentFreshWater = {
-      currentOunces: 0,
+      currentGallons: 0,
       currentSeconds: 0
     };
     loadState();
@@ -307,7 +315,7 @@ module.exports = function (app) {
     if (options.freshWater) {
       // Optionally reset current usage when requested from settings
       if (options.freshWater.resetCurrentUsage) {
-        currentFreshWater.currentOunces = 0;
+        currentFreshWater.currentGallons = 0;
         currentFreshWater.currentSeconds = 0;
       }
 
@@ -317,16 +325,16 @@ module.exports = function (app) {
         state.freshWater.allTimeTotalSeconds
       );
       publishValue(
-        FRESH_WATER_ALLTIME_OUNCES_PATH,
-        state.freshWater.allTimeTotalOunces
+        FRESH_WATER_ALLTIME_GALLONS_PATH,
+        state.freshWater.allTimeTotalGallons
       );
       publishValue(
         FRESH_WATER_CURRENT_SECONDS_PATH,
         currentFreshWater.currentSeconds
       );
       publishValue(
-        FRESH_WATER_CURRENT_OUNCES_PATH,
-        currentFreshWater.currentOunces
+        FRESH_WATER_CURRENT_GALLONS_PATH,
+        currentFreshWater.currentGallons
       );
     }
 
