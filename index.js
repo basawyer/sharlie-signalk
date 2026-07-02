@@ -299,6 +299,20 @@ module.exports = function (app) {
     }
   }
 
+  async function sendToMeshtastic(message) {
+    const cmd = `/home/basawyer/.local/bin/meshtastic --host 192.168.8.105 && /home/basawyer/.local/bin/meshtastic --host 192.168.8.105 --sendtext "${message}" --ch-index 1`;
+
+    execFile(cmd, { shell: true }, (error, stdout, stderr) => {
+      if (error) {
+        fs.appendFileSync('/tmp/sharlie.log', 'error: ');
+        fs.appendFileSync('/tmp/sharlie.log', error.message);
+        fs.appendFileSync('/tmp/sharlie.log', '\n');
+      }
+    });
+  }
+
+  let unsubscribe = null;
+
   plugin.start = function (options) {
     lastStates = {};
     currentFreshWater = {
@@ -311,6 +325,14 @@ module.exports = function (app) {
       app.debug('Sharlie plugin disabled (enabled=false)');
       return;
     }
+
+    unsubscribe = app.streambundle.getBus().onValue(event => {
+      if (event.path && event.path.startsWith('notifications')) {
+        const state = event.value && event.value.state;
+        const message = `🚨 BOAT ALARM: ${event.path} — ${state} 🚨`;
+        sendToMeshtastic(message);
+      }
+    });
 
     if (options.freshWater) {
       // Optionally reset current usage when requested from settings
@@ -348,6 +370,8 @@ module.exports = function (app) {
       clearInterval(intervalHandle);
       intervalHandle = null;
     }
+
+    if (unsubscribe) { unsubscribe(); unsubscribe = null; }
 
     saveState();
   };
