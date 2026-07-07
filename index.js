@@ -248,12 +248,16 @@ module.exports = function (app) {
     return !rawHigh;
   }
 
-  function readSelfNumber(pathValue) {
+  function readSelfValue(pathValue) {
     const data = app.getSelfPath(pathValue);
     if (data == null) {
       return null;
     }
-    const value = typeof data === 'object' && 'value' in data ? data.value : data;
+    return typeof data === 'object' && 'value' in data ? data.value : data;
+  }
+
+  function readSelfNumber(pathValue) {
+    const value = readSelfValue(pathValue);
     return Number.isFinite(value) ? value : null;
   }
 
@@ -396,7 +400,11 @@ module.exports = function (app) {
 
   plugin.start = function (options) {
     lastStates = {};
-    highWindAlarmActive = false;
+    // Recover alarm state from any notification still active in Signal K, so a
+    // restart (e.g. after a config change) can still clear a raised alarm.
+    const existingWindAlarm = readSelfValue(HIGH_WIND_NOTIFICATION_PATH);
+    highWindAlarmActive = !!(existingWindAlarm
+      && (existingWindAlarm.state === 'alarm' || existingWindAlarm.state === 'emergency'));
     windBelowSince = null;
     currentFreshWater = {
       currentGallons: 0,
