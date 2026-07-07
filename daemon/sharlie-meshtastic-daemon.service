@@ -1,0 +1,18 @@
+[Unit]
+Description=Sharlie Meshtastic boat-info daemon
+After=network-online.target
+Wants=network-online.target
+# Keep retrying forever at boot even if the network/radio isn't ready yet
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=basawyer
+WorkingDirectory=/home/basawyer/sharlie-signalk/daemon
+EnvironmentFile=-/etc/default/sharlie-meshtastic-daemon
+ExecStart=/home/basawyer/sharlie-signalk/daemon/.venv/bin/python /home/basawyer/sharlie-signalk/daemon/sharlie_meshtastic_daemon.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
