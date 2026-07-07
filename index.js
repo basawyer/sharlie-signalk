@@ -20,6 +20,13 @@ module.exports = function (app) {
   const FRESH_WATER_CURRENT_GALLONS_PATH =
     'tanks.freshWater.usage.currentGallons';
 
+  // High wind alarm
+  const APPARENT_WIND_PATH = 'environment.wind.speedApparent';
+  const HIGH_WIND_NOTIFICATION_PATH = 'notifications.environment.wind.speedApparent';
+  // How long apparent wind must stay below the threshold before clearing
+  const HIGH_WIND_CLEAR_MS = 10000;
+  const MS_TO_KNOTS = 1.94384;
+
   plugin.id = 'sharlie-plugin';
   plugin.name = 'Sharlie Plugin';
   plugin.description = 'Sharlie on signal-k';
@@ -30,6 +37,9 @@ module.exports = function (app) {
 
   let intervalHandle = null;
   let lastStates = {};
+  // High wind alarm state
+  let highWindAlarmActive = false;
+  let windBelowSince = null;
   let state = {
     freshWater: {
       // Stored in gallons
@@ -103,6 +113,26 @@ module.exports = function (app) {
             description:
               'When enabled and settings are saved, currentSeconds and currentOunces will be reset to 0 (non-persisted).',
             default: false
+          }
+        }
+      },
+      highWind: {
+        type: 'object',
+        title: 'High wind alarm',
+        description:
+          'Raises a Signal K alarm when apparent wind exceeds a threshold, and clears it after the wind stays below the threshold for a while.',
+        properties: {
+          enabled: {
+            type: 'boolean',
+            title: 'Enable high wind alarm',
+            default: true
+          },
+          threshold: {
+            type: 'number',
+            title: 'High wind threshold (knots)',
+            description:
+              'Alarm is raised when apparent wind speed goes above this value.',
+            default: 35
           }
         }
       }
@@ -218,6 +248,68 @@ module.exports = function (app) {
     return !rawHigh;
   }
 
+  function readSelfNumber(pathValue) {
+    const data = app.getSelfPath(pathValue);
+    if (data == null) {
+      return null;
+    }
+    const value = typeof data === 'object' && 'value' in data ? data.value : data;
+    return Number.isFinite(value) ? value : null;
+  }
+
+  function setHighWindNotification(active, windKnots) {
+    publishValue(HIGH_WIND_NOTIFICATION_PATH, {
+      state: active ? 'alarm' : 'normal',
+      method: active ? ['visual', 'sound'] : [],
+      message: active
+        ? `High apparent wind: ${Math.round(windKnots)} kn`
+        : 'Apparent wind back to normal',
+      timestamp: new Date().toISOString()
+    });
+  }
+
+  function handleHighWind(options) {
+    const cfg = options.highWind;
+    if (!cfg || cfg.enabled === false) {
+      return;
+    }
+
+    const windMs = readSelfNumber(APPARENT_WIND_PATH);
+    if (windMs == null) {
+      // No apparent wind data; leave alarm state unchanged
+      return;
+    }
+
+    const windKnots = windMs * MS_TO_KNOTS;
+    const threshold = Number(cfg.threshold != null ? cfg.threshold : 35);
+
+    if (windKnots > threshold) {
+      windBelowSince = null;
+      if (!highWindAlarmActive) {
+        highWindAlarmActive = true;
+        setHighWindNotification(true, windKnots);
+      }
+      return;
+    }
+
+    // Wind is at or below the threshold
+    if (!highWindAlarmActive) {
+      return;
+    }
+
+    const now = Date.now();
+    if (windBelowSince == null) {
+      windBelowSince = now;
+      return;
+    }
+
+    if (now - windBelowSince >= HIGH_WIND_CLEAR_MS) {
+      highWindAlarmActive = false;
+      windBelowSince = null;
+      setHighWindNotification(false, windKnots);
+    }
+  }
+
   function handleBilge(input, isOn) {
     const key = 'bilge';
     const prev = lastStates[key];
@@ -275,6 +367,9 @@ module.exports = function (app) {
   }
 
   async function pollOnce(options) {
+    // High wind alarm (based on Signal K apparent wind data)
+    handleHighWind(options);
+
     // Bilge pump
     if (options.bilge && options.bilge.gpio != null) {
       try {
@@ -301,6 +396,8 @@ module.exports = function (app) {
 
   plugin.start = function (options) {
     lastStates = {};
+    highWindAlarmActive = false;
+    windBelowSince = null;
     currentFreshWater = {
       currentGallons: 0,
       currentSeconds: 0
